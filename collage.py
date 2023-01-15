@@ -4,6 +4,8 @@ from PIL import JpegImagePlugin
 import cv2
 import sys
 import os 
+import math
+import bisect
 
 # Workaround to make sure we open JPEG as JPEG
 JpegImagePlugin._getmp = lambda: None
@@ -38,7 +40,8 @@ class ImageTransform:
         if self.operation == "Zoom":
             return inputImg.resize((int(a * self.factor_1), int(b * self.factor_1)))
         if self.operation == "Move":
-            res = Image.new('RGB', inputImg.size, color=color)
+            res = Image.new('RGBA', inputImg.size, color=color)
+            res.putalpha(0)
             deltaA = int(self.factor_1 * a)
             deltaB = int(self.factor_2 * b)
             pasteCoords = (deltaA, deltaB)
@@ -50,8 +53,9 @@ class ImageTransform:
             margin = int(self.factor_1 * min(c, d))
             cropDimensions = (margin, margin, c - margin, d - margin)
             zoomedOut = inputImg.crop(cropDimensions) # .resize(targetDimensions)
-            newImage = Image.new('RGB', targetDimensions, color=color)
-            newImage.paste(zoomedOut, (margin, margin))
+            newImage = Image.new('RGBA', targetDimensions) # , color=color)
+            newImage.putalpha(0)
+            newImage.paste(zoomedOut, (margin, margin), zoomedOut)
             return newImage
         if self.operation == "FixedMargin":
             # Zoom out by factor 
@@ -59,7 +63,8 @@ class ImageTransform:
             margin = self.factor_1
             cropDimensions = (margin, margin, c - margin, d - margin)
             zoomedOut = inputImg.crop(cropDimensions) # .resize(targetDimensions)
-            newImage = Image.new('RGB', targetDimensions, color=color)
+            newImage = Image.new('RGBA', targetDimensions) # , color=color)
+            newImage.putalpha(0)
             newImage.paste(zoomedOut, (margin, margin))
             return newImage
 
@@ -116,7 +121,8 @@ class DivisionGraph:
     
     def toImage(self, size_x, size_y, count=1, color=(0, 0, 255)):
         n = 0
-        img = Image.new('RGB', (size_x, size_y), color=color)
+        img = Image.new('RGBA', (size_x, size_y), color=color)
+        img.putalpha(0)
         if self.isFinal:
             print(f"Final image {count} - size {size_x}, {size_y}")
             if self.image:
@@ -136,7 +142,7 @@ class DivisionGraph:
                 newImage = self.image.resize((dim_x, dim_y))
                 for t in self.imgTransforms:
                     newImage = t.apply(newImage, targetDimensions = (a, b), color=color)
-                img.paste(newImage)
+                img.paste(newImage, (0, 0), newImage)
 
             else:
                 d = ImageDraw.Draw(img)
@@ -162,8 +168,8 @@ class DivisionGraph:
             color_2 = (color[0], color[1], int(3 * color[2] / 4))
             img1, n1 = self.children[0].toImage(size_1_x, size_1_y, count, color_1)
             img2, n2 = self.children[1].toImage(size_2_x, size_2_y, count + n1, color_2)
-            img.paste(img1, (0, 0))
-            img.paste(img2, pasteCoords)
+            img.paste(img1, (0, 0), img1)
+            img.paste(img2, pasteCoords, img2)
             n = n1 + n2
         return img, n
 
@@ -205,12 +211,28 @@ class Grid:
 
     def saveAsJpegWithLegend(self, outputFileName):
         outImg, _ = self.repartitionGraph.toImage(self.size_x, self.size_y, color=self.fillColor)
+        print("outImg: ", outImg)
         heightLegend = int(self.size_y * (self.legend_factor - 1))
         fullImage_dim = (self.size_x, self.size_y + heightLegend)
         
-        newImage = Image.new('RGB', fullImage_dim, color=self.fillColor)
-        outImg.save(outputFileName, "JPEG")
-        newImage.paste(outImg, (0, 0))
+        newImage = Image.new('RGBA', fullImage_dim) #, color=self.fillColor)
+        newImage.putalpha(0)
+
+        # Add background
+        color_1 = hex_to_rgb("812627")
+        color_2 = hex_to_rgb("8B292A") #  631D1E
+        color_3 = hex_to_rgb("621D1E")
+        color_4 = hex_to_rgb("671E20")
+        colors = [color_1, color_2, color_3, color_4]
+        ranges = [0, 0.5, 0.9, 1]
+        print("Generating background with a beautiful gradient")
+        im = genRadialRadient(fullImage_dim, (fullImage_dim[0] / 2, fullImage_dim[1] / 2), colors, ranges)
+        newImage.paste(im, (0, 0), im)
+        print("newImage with gradient: ", newImage)
+        rgb_im = newImage.convert('RGB')
+        # outImg.save(outputFileName, "JPEG")
+        rgb_im.save(outputFileName, "JPEG")
+        newImage.paste(outImg, (0, 0), outImg)
         drawer = ImageDraw.Draw(newImage)
         fntSize = int(3  * heightLegend / 5)
         # fntSize = int(2  * heightLegend / 5)
@@ -222,7 +244,10 @@ class Grid:
         drawer.text(textCoords, self.legend, fill = self.textColor, font=fnt, stroke_width=4, stroke_fill="black")
 
         # newImage.show()
-        newImage.save("new.jpg", "JPEG")
+        # newImage.save("new.jpg", "JPEG")
+        print("newImage with text: ", newImage)
+        rgb_im = newImage.convert('RGB')
+        rgb_im.save("new.jpg", "JPEG")
 
 
 def generateGrid():
@@ -336,24 +361,74 @@ def reload():
     del collage2023_3
     exec(open(sys.argv[0]).read())
 
+# TODO: Add class to handle background transforms.
+def isSorted(array):
+    return all(a <= b for a, b in zip(array, array[1:]))
+
+# Thanks Stackoverflow
+def colorForGradient(percent, colorArray, rangePercentages):
+    def getIndex(ranges, x): 
+        return (bisect.bisect_left(ranges, x), bisect.bisect_right(ranges, x))
+    i0, i1 = getIndex(rangePercentages, percent)
+    if i0 == i1:
+        # In the middle of an interval
+        innerColor = colorArray[i0 - 1]
+        outerColor = colorArray[i1]
+        p = (rangePercentages[i0] - percent) / (rangePercentages[i0] - rangePercentages[i0 - 1])
+    else:
+        innerColor = colorArray[i0]
+        outerColor = colorArray[i0]
+        p = 1
+    #Calculate r, g, and b values
+    # print(p)
+    r = outerColor[0] * (1 - p) + innerColor[0] * p
+    g = outerColor[1] * (1 - p) + innerColor[1] * p
+    b = outerColor[2] * (1 - p) + innerColor[2] * p
+    return (int(r), int(g), int(b))
+
+def genRadialRadient(imageSize, center, colorArray, rangePercentages):
+    x0, y0 = center
+    longestSemiDiagonal = math.sqrt(2) * max(x0, imageSize[0] - x0, y0, imageSize[1] - y0)
+    image = Image.new('RGBA', imageSize)
+    assert len(colorArray) == len(rangePercentages)
+    assert isSorted(rangePercentages)
+    innerColor = [80, 80, 255] # Color at the center
+    outerColor = [0, 0, 80] # Color at the corners
+
+    def colorForCoords(x, y):
+        # Find the distance to the center
+        distanceToCenter = math.sqrt((x - x0) ** 2 + (y - y0) ** 2)
+        # Make it on a scale from 0 to 1
+        distanceToCenter = float(distanceToCenter) / longestSemiDiagonal
+        return colorForGradient(distanceToCenter, colorArray, rangePercentages)
+
+    for y in range(imageSize[1]):
+        for x in range(imageSize[0]):
+            #Place the pixel        
+            image.putpixel((x, y), colorForCoords(x, y))
+    return image
+
+
 main()
 
 # TODO: Add radial gradiant
+
 if False:
-    import math
-    imgsize = (250, 250) #The size of the image
-    image = Image.new('RGB', imgsize) #Create the image
-    innerColor = [80, 80, 255] #Color at the center
-    outerColor = [0, 0, 80] #Color at the corners
-    for y in range(imgsize[1]):
-        for x in range(imgsize[0]):
-            #Find the distance to the center
-            distanceToCenter = math.sqrt((x - imgsize[0]/2) ** 2 + (y - imgsize[1]/2) ** 2)
-            #Make it on a scale from 0 to 1
-            distanceToCenter = float(distanceToCenter) / (math.sqrt(2) * imgsize[0]/2)
-            #Calculate r, g, and b values
-            r = outerColor[0] * distanceToCenter + innerColor[0] * (1 - distanceToCenter)
-            g = outerColor[1] * distanceToCenter + innerColor[1] * (1 - distanceToCenter)
-            b = outerColor[2] * distanceToCenter + innerColor[2] * (1 - distanceToCenter)
-            #Place the pixel        
-            image.putpixel((x, y), (int(r), int(g), int(b)))
+    color_1 = hex_to_rgb("000000") # hex_to_rgb("812627")
+    color_2 = hex_to_rgb("FF0000") # hex_to_rgb("631D1E")
+    color_3 = hex_to_rgb("00FF00") # hex_to_rgb("621D1E")
+    color_4 = hex_to_rgb("0000FF") # hex_to_rgb("671E20")
+    # im = genRadialRadient((800, 800), (400, 400), [(0, 0, 255), (0, 255, 0)], [0, 1])
+    # colors = [color_1, color_2, color_4]
+    # ranges = [0, 0.5, 1]
+    color_1 = hex_to_rgb("812627")
+    color_2 = hex_to_rgb("631D1E")
+    color_3 = hex_to_rgb("621D1E")
+    color_4 = hex_to_rgb("671E20")
+    colors = [color_1, color_2, color_3, color_4]
+    ranges = [0, 0.5, 0.9, 1]
+    im = genRadialRadient((800, 800), (400, 400), colors, ranges)
+
+    # for i in range(101):
+    #     print(i, colorForGradient(float(i)/100., colors, ranges))
+
